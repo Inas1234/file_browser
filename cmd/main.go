@@ -5,7 +5,9 @@ import (
 	"image/color"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -13,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -49,11 +52,11 @@ func main() {
 	back.OnTapped = func() {
 		dir := filepath.Dir(input.Text)
 		input.SetText(dir)
-		browseDir(dir, fileList)
+		browseDir(dir, fileList, myWindow)
 	}
 
 	input.OnSubmitted = func(text string) {
-		browseDir(text, fileList)
+		browseDir(text, fileList, myWindow)
 	}
 
 	searchInput.OnSubmitted = func(text string) {
@@ -63,7 +66,7 @@ func main() {
 	myWindow.ShowAndRun()
 }
 
-func browseDir(dir string, fileList *fyne.Container) {
+func browseDir(dir string, fileList *fyne.Container, myWindow fyne.Window) {
 	list, err := ioutil.ReadDir(dir)
 	if err != nil {
 		panic(err)
@@ -81,7 +84,24 @@ func browseDir(dir string, fileList *fyne.Container) {
 		button := widget.NewButtonWithIcon(name, icon, func() {
 			if item.IsDir() {
 				newDir := filepath.Join(dir, name)
-				browseDir(newDir, fileList)
+				browseDir(newDir, fileList, myWindow)
+			} else {
+				fileDialog := widget.NewLabel("File: " + name + "\nPath: " + dir)
+				confirmButton := widget.NewButton("Open", func() {
+					openFile(dir, name)
+				})
+				cancelButton := widget.NewButton("Delete", func() {
+					deleteFile(dir, name)
+					browseDir(dir, fileList, myWindow)
+				})
+
+				dialogContent := container.NewVBox(fileDialog, confirmButton, cancelButton)
+				dialog := dialog.NewCustom("File Dialog", "Close", dialogContent, myWindow)
+				dialog.Show()
+
+				dialog.SetOnClosed(func() {
+				})
+
 			}
 		})
 		fileList.Add(button)
@@ -90,65 +110,102 @@ func browseDir(dir string, fileList *fyne.Container) {
 	fileList.Refresh()
 }
 
+func deleteFile(dir string, name string) {
+	err := os.Remove(filepath.Join(dir, name))
+	if err != nil {
+		panic(err)
+	}
+}
+
+func openFile(dir string, name string) {
+	fullPath := filepath.Join(dir, name)
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", fullPath)
+	case "darwin":
+		cmd = exec.Command("open", fullPath)
+	case "linux":
+		cmd = exec.Command("xdg-open", fullPath)
+	default:
+		fmt.Printf("unsupported operating system: %s\n", runtime.GOOS)
+		return
+	}
+
+	err := cmd.Start()
+	if err != nil {
+		fmt.Printf("error opening file: %v\n", err)
+	}
+}
+
+
 func searchDir(dir string, searchText string, fileList *fyne.Container, progressContainer *fyne.Container) {
-	progressContainer.Show()
+    progressContainer.Show()
 
-	fileList.Objects = nil
+    fileList.Objects = nil
 
-	var wg sync.WaitGroup
-	fileChan := make(chan string)
+    var wg sync.WaitGroup
+    fileChan := make(chan string)
 
-	go func() {
-		for f := range fileChan {
-			name := filepath.Base(f)
-			icon := theme.DocumentIcon()
-			dirPath := filepath.Dir(f)
-			if filepath.Dir(f) == dir {
-				icon = theme.FolderOpenIcon()
-			}
-			fileButton := widget.NewButtonWithIcon(name, icon, func() {
-				// You may want to do something when the file button is clicked
-			})
-			dirLabel := canvas.NewText(dirPath, color.White)
-			dirLabel.TextSize = 10 // set the text size to 10 (you can adjust this value to your liking)
-			dirContainer := container.NewHBox(layout.NewSpacer(), dirLabel, layout.NewSpacer())
-			entryContainer := container.NewVBox(fileButton, dirContainer)
+    go func() {
+        for f := range fileChan {
+            name := filepath.Base(f)
+            icon := theme.DocumentIcon()
+            dirPath := filepath.Dir(f)
+            if filepath.Dir(f) == dir {
+                icon = theme.FolderOpenIcon()
+            }
+            fileButton := widget.NewButtonWithIcon(name, icon, func() {})
+            dirLabel := canvas.NewText(dirPath, color.White)
+            dirLabel.TextSize = 10 // set the text size to 10 (you can adjust this value to your liking)
+            dirContainer := container.NewHBox(layout.NewSpacer(), dirLabel, layout.NewSpacer())
+			buttonAndDir := container.NewVBox(layout.NewSpacer(), fileButton, layout.NewSpacer(), dirContainer)
+            singleContainer := container.NewVBox(buttonAndDir)
+            fileList.Add(singleContainer)
+            fileList.Refresh()
+        }
+    }()
 
-			fileList.Add(entryContainer)
-			fileList.Refresh()
-		}
-	}()
+    // Assume dir is root directory
+    rootDir, err := ioutil.ReadDir(dir)
+    if err != nil {
+        fmt.Printf("error reading the directory %v: %v\n", dir, err)
+    }
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				if os.IsPermission(err) {
-					
-					return filepath.SkipDir
-				}
-				fmt.Printf("prevent panic by handling failure accessing a path %q: %v\n", path, err)
-				return err
-			}
+    for _, d := range rootDir {
+        if d.IsDir() {
+            wg.Add(1)
+            go func(d os.FileInfo) {
+                defer wg.Done()
+                err := filepath.Walk(filepath.Join(dir, d.Name()), func(path string, info os.FileInfo, err error) error {
+                    if err != nil {
+                        if os.IsPermission(err) {
+                            return filepath.SkipDir
+                        }
+                        fmt.Printf("prevent panic by handling failure accessing a path %q: %v\n", path, err)
+                        return err
+                    }
 
-			if info.IsDir() {
-				return nil
-			}
+                    if info.IsDir() {
+                        return nil
+                    }
 
-			if strings.Contains(strings.ToLower(info.Name()), strings.ToLower(searchText)) {
-				fileChan <- path
-			}
+                    if strings.Contains(strings.ToLower(info.Name()), strings.ToLower(searchText)) {
+                        fileChan <- path
+                    }
 
-			return nil
-		})
-		if err != nil {
-			fmt.Printf("error walking the path %v: %v\n", dir, err)
-		}
-	}()
+                    return nil
+                })
+                if err != nil {
+                    fmt.Printf("error walking the path %v: %v\n", filepath.Join(dir, d.Name()), err)
+                }
+            }(d)
+        }
+    }
 
-	wg.Wait()
-	close(fileChan)
+    wg.Wait()
+    close(fileChan)
 
-	progressContainer.Hide()
+    progressContainer.Hide()
 }
